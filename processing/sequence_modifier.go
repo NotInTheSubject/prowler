@@ -7,50 +7,57 @@ import (
 )
 
 type SequenceModifier interface {
-	GetModifier(RequestID) mods.Modifier
+	Modify(IdentifiedRequest) *http.Request
 	GetNextSequenceModifier() SequenceModifier
 }
 
-type defaultSeqMod struct {
-	originOperator mods.Operator
-	operators      map[RequestID]mods.Operator
-	// probably rename
-	isCompletedModded map[RequestID]bool
-	// isNewModSequence  bool
+func NewSequenceModifier(modifiers []mods.Modifier) SequenceModifier {
+	return seqModifier{modifiers: modifiers, requestsProgress: make(map[RequestID]int), isNewCombination: false}
 }
 
-func (sm defaultSeqMod) GetModifier(id RequestID) mods.Modifier {
-	// TODO: think about wrapping a request before modifying
-	var (
-		mod         mods.Modifier
-		identityMod mods.Modifier = func(r *http.Request) *http.Request { return r }
-	)
+type seqModifier struct {
+	modifiers        []mods.Modifier
+	requestsProgress map[RequestID]int
+	isNewCombination bool
+}
 
-	modsOp, found := sm.operators[id]
-	if !found {
-		modsOp = sm.originOperator.Copy()
-		sm.operators[id] = modsOp
+func (sm seqModifier) Modify(r IdentifiedRequest) *http.Request {
+
+	requestCopy, err := DeepCopyHTTPRequest(r.Request)
+	if err != nil {
+		return r.Request
 	}
 
-	if _, isCompletedModded := sm.isCompletedModded[id]; !isCompletedModded {
-		mod = modsOp.GetNewMod()
-	} else {
-		mod = modsOp.GetLastMod()
-		if mod == nil {
-			sm.isCompletedModded[id] = true
+	if len(sm.modifiers) == 0 {
+		return requestCopy
+	}
+
+	if _, progressFound := sm.requestsProgress[r.Identifer]; !progressFound {
+		sm.requestsProgress[r.Identifer] = 0
+	}
+
+	if !sm.isNewCombination {
+		sm.requestsProgress[r.Identifer]++
+		if (sm.requestsProgress[r.Identifer] % len(sm.modifiers)) != 0 {
+			sm.isNewCombination = true
 		}
 	}
 
-	if mod == nil {
-		mod = identityMod
+	for i := sm.requestsProgress[r.Identifer]; i%len(sm.modifiers) != sm.requestsProgress[r.Identifer]%len(sm.modifiers); i++ {
+		isChanged := sm.modifiers[i%len(sm.modifiers)].Modify(requestCopy)
+		if isChanged {
+			sm.requestsProgress[r.Identifer] = i
+			break
+		}
 	}
-	return mod
+
+	return requestCopy
 }
 
-func (sm defaultSeqMod) GetNextSequenceModifier() SequenceModifier {
-	return defaultSeqMod{}
-}
-
-func NewDefaultSequenceModifier(modOp mods.Operator) SequenceModifier {
-	return defaultSeqMod{originOperator: modOp, operators: make(map[interface{}]mods.Operator)}
+func (sm seqModifier) GetNextSequenceModifier() SequenceModifier {
+	var newRequestProgress = make(map[RequestID]int)
+	for k, v := range sm.requestsProgress {
+		newRequestProgress[k] = v
+	}
+	return seqModifier{modifiers: sm.modifiers, requestsProgress: newRequestProgress, isNewCombination: false}
 }
