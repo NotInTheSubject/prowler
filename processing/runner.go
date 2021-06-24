@@ -37,12 +37,14 @@ func RunProwling(logger *logrus.Logger, es ExternalSystem, client http.Client, m
 	var (
 		statistic        = FuzzingStatistic{RequestStatistic: make(map[interface{}]int)}
 		commonLog        = logger.WithField("env", "RunProwling")
-		lastResponse     *http.Response
 		sequenceModifier = NewSequenceModifier(mods)
 	)
 
 	for ; !stopCondition(statistic); sequenceModifier = sequenceModifier.GetNextSequenceModifier() {
-		var sequenceProducer func(*http.Response) (IdentifiedRequest, error)
+		var (
+			sequenceProducer func(*http.Response) (IdentifiedRequest, error)
+			lastResponse *http.Response = nil
+		)
 
 		if sp, err := es.GetSequenceProducer(); err != nil {
 			errReport := fmt.Sprintf("cannot get a sequence producer: %+v", err)
@@ -62,7 +64,9 @@ func RunProwling(logger *logrus.Logger, es ExternalSystem, client http.Client, m
 		}
 
 		for !stopCondition(statistic) {
-			var sequenceLog = commonLog
+			var (
+				sequenceLog                 = commonLog
+			)
 
 			request, err := sequenceProducer(lastResponse)
 			if err != nil {
@@ -88,6 +92,10 @@ func RunProwling(logger *logrus.Logger, es ExternalSystem, client http.Client, m
 			}
 			sequenceLog = logWithResponse(sequenceLog, lastResponse)
 			defer lastResponse.Body.Close()
+
+			if lastResponse.StatusCode/100 == 4 {
+				sequenceLog.Info("4** statusCode is received")
+			}
 
 			if lastResponse.StatusCode/100 == 5 {
 				sequenceLog.Info("5** statusCode is received")
