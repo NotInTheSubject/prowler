@@ -2,6 +2,7 @@ package processing
 
 import (
 	"fmt"
+	"io/ioutil"
 	"net/http"
 
 	"github.com/NotInTheSubject/prowler/mods"
@@ -32,49 +33,66 @@ type ExternalSystem interface {
 
 type StopCondition func(FuzzingStatistic) bool
 
-func RunProwling(logger *logrus.Logger, es ExternalSystem, client http.Client, mods mods.Operator, stopCondition StopCondition) error {
+func RunProwling(logger *logrus.Logger, es ExternalSystem, client http.Client, mods []mods.Modifier, stopCondition StopCondition) error {
 	var (
-		statistic    = FuzzingStatistic{RequestStatistic: make(map[interface{}]int)}
-		commonLog    = logger.WithField("env", "RunProwling")
-		lastResponse *http.Response
+		statistic        = FuzzingStatistic{RequestStatistic: make(map[interface{}]int)}
+		commonLog        = logger.WithField("env", "RunProwling")
+		lastResponse     *http.Response
+		sequenceModifier = NewSequenceModifier(mods)
 	)
 
-	for !stopCondition(statistic) {
-		sp, err := es.GetSequenceProducer()
-		if err != nil {
+	for ; !stopCondition(statistic); sequenceModifier = sequenceModifier.GetNextSequenceModifier() {
+		var sequenceProducer func(*http.Response) (IdentifiedRequest, error)
+
+		if sp, err := es.GetSequenceProducer(); err != nil {
 			errReport := fmt.Sprintf("cannot get a sequence producer: %+v", err)
 			commonLog.Error(errReport)
 			return fmt.Errorf("RunProwling: " + errReport)
+		} else {
+			sequenceProducer = func(resp *http.Response) (IdentifiedRequest, error) {
+				r, err := sp.GetRequest(resp)
+				if err == nil {
+					statistic.RequestStatistic[r.Identifer]++
+				}
+				if r.Request == nil || r.Identifer == nil {
+					statistic.SequenceExecutedTimes++
+				}
+				return r, err
+			}
 		}
 
 		for !stopCondition(statistic) {
-			var requestLog = commonLog.WithFields(logrus.Fields{})
+			var sequenceLog = commonLog
 
-			request, err := sp.GetRequest(lastResponse)
+			request, err := sequenceProducer(lastResponse)
 			if err != nil {
 				errReport := fmt.Sprintf("cannot get a new request: %+v", err)
-				requestLog.Error(errReport)
-				return fmt.Errorf("RunProwling: " + errReport)
-			}
-
-			if request.Identifer == nil || request.Request == nil {
+				sequenceLog.Info(errReport)
 				break
 			}
 
-			requestLog = requestLog.WithField("request-id", request.Identifer)
-			logWithRequest(requestLog, request.Request).Debug()
-			
-			// operate req by modifiers
+			if request.Identifer == nil || request.Request == nil {
+				sequenceLog.Info("the sequence is finished")
+				break
+			}
 
-			lastResponse, err = client.Do(request.Request)
+			sequenceLog = logWithRequest(sequenceLog.WithField("request-id", request.Identifer), request.Request)
+
+			moddedRequest := sequenceModifier.Modify(request)
+
+			lastResponse, err = client.Do(moddedRequest)
 			if err != nil {
 				errReport := fmt.Sprintf("executing a request is failed: %+v", err)
-				requestLog.Error(errReport)
-				return fmt.Errorf("RunProwling: " + errReport)
+				sequenceLog.Error(errReport)
+				break
 			}
-			statistic.RequestStatistic[request.Identifer]++
+			sequenceLog = logWithResponse(sequenceLog, lastResponse)
+			defer lastResponse.Body.Close()
+
+			if lastResponse.StatusCode/100 == 5 {
+				sequenceLog.Info("5** statusCode is received")
+			}
 		}
-		statistic.SequenceExecutedTimes++
 	}
 
 	return nil
@@ -86,8 +104,22 @@ func logWithRequest(logEntry *logrus.Entry, request *http.Request) *logrus.Entry
 	}
 
 	return logEntry.WithFields(logrus.Fields{
-		"headers": request.Header,
-		"method":  request.Method,
-		"url":     request.URL,
+		"req-headers": request.Header,
+		"req-method":  request.Method,
+		"req-url":     request.URL,
+	})
+}
+
+func logWithResponse(logEntry *logrus.Entry, response *http.Response) *logrus.Entry {
+	bodyBytes, err := ioutil.ReadAll(response.Body)
+	if err != nil {
+		logEntry.Errorf("cannot read response body: %+v", err)
+	}
+	bodyString := string(bodyBytes)
+
+	return logEntry.WithFields(logrus.Fields{
+		"resp-status-code": response.StatusCode,
+		"resp-headers":     response.Header,
+		"resp-body":        bodyString,
 	})
 }
