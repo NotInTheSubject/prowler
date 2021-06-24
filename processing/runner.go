@@ -111,15 +111,19 @@ func logWithRequest(logEntry *logrus.Entry, request *http.Request) *logrus.Entry
 }
 
 func logWithResponse(logEntry *logrus.Entry, response *http.Response) *logrus.Entry {
-	bodyBytes, err := ioutil.ReadAll(response.Body)
+	respCopy, err := DeepCopyHTTPResponse(response)
+	if err != nil {
+		logEntry.Errorf("cannot read response body: %+v", err)
+	}
+	bodyBytes, err := ioutil.ReadAll(respCopy.Body)
 	if err != nil {
 		logEntry.Errorf("cannot read response body: %+v", err)
 	}
 	bodyString := string(bodyBytes)
 
 	return logEntry.WithFields(logrus.Fields{
-		"resp-status-code": response.StatusCode,
-		"resp-headers":     response.Header,
+		"resp-status-code": respCopy.StatusCode,
+		"resp-headers":     respCopy.Header,
 		"resp-body":        bodyString,
 	})
 }
